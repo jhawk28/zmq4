@@ -38,7 +38,8 @@ type Conn struct {
 	closed         int32
 	onCloseErrorCB func(c *Conn)
 
-	NonceIdx uint64
+	NonceIdx  uint64
+	SharedKey *[32]byte
 }
 
 func (c *Conn) Close() error {

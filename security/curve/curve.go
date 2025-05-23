@@ -46,10 +46,7 @@ func NewKeyPair() (*KeyPair, error) {
 type security struct {
 	serverPubKey [keySize]byte // Long-term server public key
 	keys         *KeyPair      // Long-term client key pair (optional for client, required for server)
-	ephemeral    *KeyPair      // Ephemeral session key pair
-	secretKey    [keySize]byte // Derived shared secret key
 	asServer     bool          // True if this is a server
-	sharedKey    [keySize]byte // Pre-computed shared key (for optimization)
 }
 
 // SecurityForClient returns a CURVE security mechanism for a client.
@@ -88,7 +85,7 @@ func (sec *security) Handshake(conn *zmq4.Conn, server bool) error {
 
 	// Create new ephemeral key pair for this connection
 	var err error
-	sec.ephemeral, err = NewKeyPair()
+	ephemeral, err := NewKeyPair()
 	if err != nil {
 		return fmt.Errorf("security/curve: could not generate session keypair: %w", err)
 	}
@@ -96,35 +93,36 @@ func (sec *security) Handshake(conn *zmq4.Conn, server bool) error {
 	if server {
 		return sec.serverHandshake(conn)
 	}
-	return sec.clientHandshake(conn)
+	return sec.clientHandshake(conn, ephemeral)
 }
 
-func (sec *security) clientHandshake(conn *zmq4.Conn) error {
+func (sec *security) clientHandshake(conn *zmq4.Conn, ephemeral *KeyPair) error {
 	var nonce Nonce
-	err := sec.doHello(conn, &nonce)
+	err := sec.doHello(conn, &nonce, ephemeral)
 	if err != nil {
 		return fmt.Errorf("security/curve: could not send HELLO to server: %w", err)
 	}
 
-	servCookie, err := sec.doWelcome(&nonce, conn)
+	servCookie, secretKey, err := sec.doWelcome(&nonce, conn, ephemeral)
 	if err != nil {
 		return fmt.Errorf("security/curve: failed WELCOME: %w", err)
 	}
 
-	err = sec.doInitiate(conn, servCookie, &nonce)
+	err = sec.doInitiate(conn, servCookie, &nonce, secretKey, ephemeral)
 	if err != nil {
 		return fmt.Errorf("security/curve: failed INITIATE: %w", err)
 	}
 
-	servMeta, err := sec.doReady(conn, &nonce)
+	servMeta, err := sec.doReady(conn, &nonce, secretKey, ephemeral)
 	if err != nil {
 		return fmt.Errorf("security/curve: failed READY: %w", err)
 	}
 
 	conn.NonceIdx = 3
 	conn.Peer.NonceIdx = 1
-
-	box.Precompute(&sec.sharedKey, &sec.secretKey, &sec.ephemeral.Private)
+	var sharedKey [32]byte
+	box.Precompute(&sharedKey, secretKey, &ephemeral.Private)
+	conn.SharedKey = &sharedKey
 
 	// Unmarshal the server metadata
 	err = conn.Peer.Meta.UnmarshalZMTP(servMeta)
@@ -168,8 +166,9 @@ func (sec *security) serverHandshake(conn *zmq4.Conn) error {
 
 	conn.NonceIdx = 2
 	conn.Peer.NonceIdx = 2
-
-	box.Precompute(&sec.sharedKey, &clientTransPubKey, &kp.Private)
+	var sharedKey [32]byte
+	box.Precompute(&sharedKey, &clientTransPubKey, &kp.Private)
+	conn.SharedKey = &sharedKey
 	return nil
 }
 
@@ -192,7 +191,7 @@ func (sec *security) Encrypt(conn *zmq4.Conn, data []byte, more bool) ([]byte, e
 		toSeal[0] = 0x1
 	}
 	copy(toSeal[1:], data)
-	box.SealAfterPrecomputation(out[16:16], toSeal, nonce.N(), &sec.sharedKey)
+	box.SealAfterPrecomputation(out[16:16], toSeal, nonce.N(), conn.SharedKey)
 	return out, nil
 }
 
@@ -222,7 +221,7 @@ func (sec *security) Decrypt(conn *zmq4.Conn, body []byte) ([]byte, bool, error)
 	conn.Peer.NonceIdx++
 	copy(nonce[16:], body[8:])
 	out := make([]byte, len(body)-32)
-	out, ok := box.OpenAfterPrecomputation(out[0:0], body[16:], nonce.N(), &sec.sharedKey)
+	out, ok := box.OpenAfterPrecomputation(out[0:0], body[16:], nonce.N(), conn.SharedKey)
 	if !ok {
 		return nil, false, fmt.Errorf("Failed opening message box")
 	}
@@ -232,41 +231,42 @@ func (sec *security) Decrypt(conn *zmq4.Conn, body []byte) ([]byte, bool, error)
 	return out, more, nil
 }
 
-func (sec security) doHello(conn *zmq4.Conn, nonce *Nonce) error {
+func (sec *security) doHello(conn *zmq4.Conn, nonce *Nonce, ephemeral *KeyPair) error {
 	body := make([]byte, 194)
 	body[0] = 1 // version
-	copy(body[74:106], sec.ephemeral.Public[:])
+	copy(body[74:106], ephemeral.Public[:])
 	body[113] = 1
 	nonce.Short("CurveZMQHELLO---", 1)
 	var sigBox [64]byte
-	box.Seal(body[114:114], sigBox[:], nonce.N(), &sec.serverPubKey, &sec.ephemeral.Private)
+	box.Seal(body[114:114], sigBox[:], nonce.N(), &sec.serverPubKey, &ephemeral.Private)
 	return conn.SendCmd(zmq4.CmdHello, body)
 }
 
-func (sec *security) doWelcome(nonce *Nonce, conn *zmq4.Conn) ([]byte, error) {
+func (sec *security) doWelcome(nonce *Nonce, conn *zmq4.Conn, ephemeral *KeyPair) ([]byte, *[32]byte, error) {
 	cmd, err := conn.RecvCmd()
 	if err != nil {
-		return nil, fmt.Errorf("security/curve: could not receive WELCOME from server: %w", err)
+		return nil, nil, fmt.Errorf("security/curve: could not receive WELCOME from server: %w", err)
 	}
 	if cmd.Name != zmq4.CmdWelcome {
-		return nil, fmt.Errorf("security/curve: expected WELCOME command, got %s", cmd.Name)
+		return nil, nil, fmt.Errorf("security/curve: expected WELCOME command, got %s", cmd.Name)
 	}
 	if len(cmd.Body) != 160 {
-		return nil, fmt.Errorf("security/curve: expected WELCOME body to be 160 bytes long")
+		return nil, nil, fmt.Errorf("security/curve: expected WELCOME body to be 160 bytes long")
 	}
 
 	nonce.FromLong("WELCOME-", cmd.Body[:16])
 	welcomeBox := make([]byte, 128)
-	_, ok := box.Open(welcomeBox[0:0], cmd.Body[16:], nonce.N(), &sec.serverPubKey, &sec.ephemeral.Private)
+	_, ok := box.Open(welcomeBox[0:0], cmd.Body[16:], nonce.N(), &sec.serverPubKey, &ephemeral.Private)
 	if !ok {
-		return nil, fmt.Errorf("Failed opening welcome box")
+		return nil, nil, fmt.Errorf("Failed opening welcome box")
 	}
 
-	copy(sec.secretKey[:], welcomeBox[:32])
-	return welcomeBox[32:], nil
+	var secretKey [32]byte
+	copy(secretKey[:], welcomeBox[:32])
+	return welcomeBox[32:], &secretKey, nil
 }
 
-func (sec *security) doInitiate(conn *zmq4.Conn, servCookie []byte, nonce *Nonce) error {
+func (sec *security) doInitiate(conn *zmq4.Conn, servCookie []byte, nonce *Nonce, secretKey *[32]byte, ephemeral *KeyPair) error {
 	meta, err := conn.Meta.MarshalZMTP()
 	if err != nil {
 		return fmt.Errorf("security/curve: could not marshal metadata: %w", err)
@@ -278,10 +278,10 @@ func (sec *security) doInitiate(conn *zmq4.Conn, servCookie []byte, nonce *Nonce
 	// initiate::vouch
 	nonce.Long("VOUCH---")
 	vouch := make([]byte, 64)
-	copy(vouch, sec.ephemeral.Public[:])
+	copy(vouch, ephemeral.Public[:])
 	copy(vouch[32:], sec.serverPubKey[:])
 	vouchBox := make([]byte, 80)
-	box.Seal(vouchBox[0:0], vouch, nonce.N(), &sec.secretKey, &sec.keys.Private)
+	box.Seal(vouchBox[0:0], vouch, nonce.N(), secretKey, &sec.keys.Private)
 
 	initBox := make([]byte, 128+len(meta))
 	copy(initBox, sec.keys.Public[:])
@@ -289,11 +289,11 @@ func (sec *security) doInitiate(conn *zmq4.Conn, servCookie []byte, nonce *Nonce
 	copy(initBox[48:128], vouchBox)
 	copy(initBox[128:], meta)
 	nonce.Short("CurveZMQINITIATE", 2)
-	box.Seal(initiateBody[104:104], initBox, nonce.N(), &sec.secretKey, &sec.ephemeral.Private)
+	box.Seal(initiateBody[104:104], initBox, nonce.N(), secretKey, &ephemeral.Private)
 	return conn.SendCmd(zmq4.CmdInitiate, initiateBody)
 }
 
-func (sec *security) doReady(conn *zmq4.Conn, nonce *Nonce) ([]byte, error) {
+func (sec *security) doReady(conn *zmq4.Conn, nonce *Nonce, secretKey *[32]byte, ephemeral *KeyPair) ([]byte, error) {
 	cmd, err := conn.RecvCmd()
 	if err != nil {
 		return nil, fmt.Errorf("security/curve: could not receive READY from server: %w", err)
@@ -311,7 +311,7 @@ func (sec *security) doReady(conn *zmq4.Conn, nonce *Nonce) ([]byte, error) {
 	}
 	nonce.Short("CurveZMQREADY---", 1)
 	servMeta := make([]byte, len(cmd.Body)-24)
-	if _, ok := box.Open(servMeta[0:0], cmd.Body[8:], nonce.N(), &sec.secretKey, &sec.ephemeral.Private); !ok {
+	if _, ok := box.Open(servMeta[0:0], cmd.Body[8:], nonce.N(), secretKey, &ephemeral.Private); !ok {
 		return nil, fmt.Errorf("security/curve: failed opening metadata")
 	}
 	return servMeta, nil
