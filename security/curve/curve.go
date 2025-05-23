@@ -121,8 +121,8 @@ func (sec *security) clientHandshake(conn *zmq4.Conn) error {
 		return fmt.Errorf("security/curve: failed READY: %w", err)
 	}
 
-	conn.SetNonce(3)
-	conn.SetPeerNonce(1)
+	conn.NonceIdx = 3
+	conn.Peer.NonceIdx = 1
 
 	box.Precompute(&sec.sharedKey, &sec.secretKey, &sec.ephemeral.Private)
 
@@ -166,8 +166,8 @@ func (sec *security) serverHandshake(conn *zmq4.Conn) error {
 		return fmt.Errorf("security/curve: Server ready failed: %w", err)
 	}
 
-	conn.SetNonce(2)
-	conn.SetPeerNonce(2)
+	conn.NonceIdx = 2
+	conn.Peer.NonceIdx = 2
 
 	box.Precompute(&sec.sharedKey, &clientTransPubKey, &kp.Private)
 	return nil
@@ -175,18 +175,18 @@ func (sec *security) serverHandshake(conn *zmq4.Conn) error {
 
 // Encrypt writes the encrypted form of data to w.
 func (sec *security) Encrypt(conn *zmq4.Conn, data []byte, more bool) ([]byte, error) {
-	defer func() { conn.IncrNonce() }()
+	defer func() { conn.NonceIdx++ }()
 	out := make([]byte, 8+8+17+len(data))
 	out[0] = uint8(7)
 	copy(out[1:], "MESSAGE")
 
 	var nonce Nonce
 	if sec.asServer {
-		nonce.Short("CurveZMQMESSAGES", conn.Nonce()) // From server
+		nonce.Short("CurveZMQMESSAGES", conn.NonceIdx) // From server
 	} else {
-		nonce.Short("CurveZMQMESSAGEC", conn.Nonce()) // From client
+		nonce.Short("CurveZMQMESSAGEC", conn.NonceIdx) // From client
 	}
-	binary.BigEndian.AppendUint64(out[8:8], conn.Nonce())
+	binary.BigEndian.AppendUint64(out[8:8], conn.NonceIdx)
 	toSeal := make([]byte, 1+len(data))
 	if more {
 		toSeal[0] = 0x1
@@ -216,10 +216,10 @@ func (sec *security) Decrypt(conn *zmq4.Conn, body []byte) ([]byte, bool, error)
 	} else {
 		nonce.Short("CurveZMQMESSAGES", shortNonce) // From server
 	}
-	if shortNonce != conn.PeerNonce()+1 {
-		return nil, false, fmt.Errorf("Peer used invalid nonce (expected %d, got %d)", conn.PeerNonce()+1, shortNonce)
+	if shortNonce != conn.Peer.NonceIdx+1 {
+		return nil, false, fmt.Errorf("Peer used invalid nonce (expected %d, got %d)", conn.Peer.NonceIdx+1, shortNonce)
 	}
-	conn.IncrPeerNonce()
+	conn.Peer.NonceIdx++
 	copy(nonce[16:], body[8:])
 	out := make([]byte, len(body)-32)
 	out, ok := box.OpenAfterPrecomputation(out[0:0], body[16:], nonce.N(), &sec.sharedKey)

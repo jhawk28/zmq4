@@ -27,8 +27,9 @@ type Conn struct {
 	Server bool
 	Meta   Metadata
 	Peer   struct {
-		Server bool
-		Meta   Metadata
+		Server   bool
+		Meta     Metadata
+		NonceIdx uint64
 	}
 
 	mu     sync.RWMutex
@@ -37,8 +38,7 @@ type Conn struct {
 	closed         int32
 	onCloseErrorCB func(c *Conn)
 
-	nonceIdx     uint64
-	peerNonceIdx uint64
+	NonceIdx uint64
 }
 
 func (c *Conn) Close() error {
@@ -520,28 +520,4 @@ func (conn *Conn) notifyOnCloseError() {
 		return
 	}
 	conn.onCloseErrorCB(conn)
-}
-
-func (conn *Conn) SetNonce(i uint64) {
-	conn.nonceIdx = i
-}
-
-func (conn *Conn) Nonce() uint64 {
-	return conn.nonceIdx
-}
-
-func (conn *Conn) SetPeerNonce(i uint64) {
-	conn.peerNonceIdx = i
-}
-
-func (conn *Conn) PeerNonce() uint64 {
-	return conn.peerNonceIdx
-}
-
-func (conn *Conn) IncrNonce() {
-	conn.nonceIdx++
-}
-
-func (conn *Conn) IncrPeerNonce() {
-	conn.peerNonceIdx++
 }
