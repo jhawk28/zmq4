@@ -50,8 +50,6 @@ type security struct {
 	secretKey    [keySize]byte // Derived shared secret key
 	asServer     bool          // True if this is a server
 	sharedKey    [keySize]byte // Pre-computed shared key (for optimization)
-	nonceIdx     uint64
-	peerNonceIdx uint64
 }
 
 // SecurityForClient returns a CURVE security mechanism for a client.
@@ -123,8 +121,8 @@ func (sec *security) clientHandshake(conn *zmq4.Conn) error {
 		return fmt.Errorf("security/curve: failed READY: %w", err)
 	}
 
-	sec.nonceIdx = 3
-	sec.peerNonceIdx = 1
+	conn.SetNonce(3)
+	conn.SetPeerNonce(1)
 
 	box.Precompute(&sec.sharedKey, &sec.secretKey, &sec.ephemeral.Private)
 
@@ -168,26 +166,27 @@ func (sec *security) serverHandshake(conn *zmq4.Conn) error {
 		return fmt.Errorf("security/curve: Server ready failed: %w", err)
 	}
 
-	sec.nonceIdx = 2
-	sec.peerNonceIdx = 2
+	conn.SetNonce(2)
+	conn.SetPeerNonce(2)
+
 	box.Precompute(&sec.sharedKey, &clientTransPubKey, &kp.Private)
 	return nil
 }
 
 // Encrypt writes the encrypted form of data to w.
-func (sec *security) Encrypt(data []byte, more bool) ([]byte, error) {
-	defer func() { sec.nonceIdx++ }()
+func (sec *security) Encrypt(conn *zmq4.Conn, data []byte, more bool) ([]byte, error) {
+	defer func() { conn.IncrNonce() }()
 	out := make([]byte, 8+8+17+len(data))
 	out[0] = uint8(7)
 	copy(out[1:], "MESSAGE")
 
 	var nonce Nonce
 	if sec.asServer {
-		nonce.Short("CurveZMQMESSAGES", sec.nonceIdx) // From server
+		nonce.Short("CurveZMQMESSAGES", conn.Nonce()) // From server
 	} else {
-		nonce.Short("CurveZMQMESSAGEC", sec.nonceIdx) // From client
+		nonce.Short("CurveZMQMESSAGEC", conn.Nonce()) // From client
 	}
-	binary.BigEndian.AppendUint64(out[8:8], sec.nonceIdx)
+	binary.BigEndian.AppendUint64(out[8:8], conn.Nonce())
 	toSeal := make([]byte, 1+len(data))
 	if more {
 		toSeal[0] = 0x1
@@ -198,7 +197,7 @@ func (sec *security) Encrypt(data []byte, more bool) ([]byte, error) {
 }
 
 // Decrypt writes the decrypted form of data to w.
-func (sec *security) Decrypt(body []byte) ([]byte, bool, error) {
+func (sec *security) Decrypt(conn *zmq4.Conn, body []byte) ([]byte, bool, error) {
 	if len(body) < 33 {
 		return nil, false, fmt.Errorf("security/curve: invalid message: too short")
 	}
@@ -217,10 +216,10 @@ func (sec *security) Decrypt(body []byte) ([]byte, bool, error) {
 	} else {
 		nonce.Short("CurveZMQMESSAGES", shortNonce) // From server
 	}
-	if shortNonce != sec.peerNonceIdx+1 {
-		return nil, false, fmt.Errorf("Peer used invalid nonce (expected %d, got %d)", sec.peerNonceIdx+1, shortNonce)
+	if shortNonce != conn.PeerNonce()+1 {
+		return nil, false, fmt.Errorf("Peer used invalid nonce (expected %d, got %d)", conn.PeerNonce()+1, shortNonce)
 	}
-	sec.peerNonceIdx++
+	conn.IncrPeerNonce()
 	copy(nonce[16:], body[8:])
 	out := make([]byte, len(body)-32)
 	out, ok := box.OpenAfterPrecomputation(out[0:0], body[16:], nonce.N(), &sec.sharedKey)

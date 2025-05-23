@@ -36,6 +36,9 @@ type Conn struct {
 
 	closed         int32
 	onCloseErrorCB func(c *Conn)
+
+	nonceIdx     uint64
+	peerNonceIdx uint64
 }
 
 func (c *Conn) Close() error {
@@ -292,7 +295,7 @@ func (c *Conn) sendMulti(msg Msg) error {
 		}
 
 		if sec, ok := c.sec.(SecurityEncryption); ok {
-			encrypt, err := sec.Encrypt(frame, more)
+			encrypt, err := sec.Encrypt(c, frame, more)
 			if err != nil {
 				return err
 			}
@@ -333,7 +336,7 @@ func (c *Conn) send(isCommand bool, body []byte, more bool) error {
 
 	// commands should not be encrypted.
 	if sec, ok := c.sec.(SecurityEncryption); ok && !isCommand {
-		encrypt, err := sec.Encrypt(body, more)
+		encrypt, err := sec.Encrypt(c, body, more)
 		if err != nil {
 			c.checkIO(err)
 			return err
@@ -442,7 +445,7 @@ func (c *Conn) read() Msg {
 		}
 
 		if sec, ok := c.sec.(SecurityEncryption); ok && !isCmd {
-			decrypt, more, err := sec.Decrypt(body)
+			decrypt, more, err := sec.Decrypt(c, body)
 			if err != nil {
 				msg.err = err
 				return msg
@@ -517,4 +520,28 @@ func (conn *Conn) notifyOnCloseError() {
 		return
 	}
 	conn.onCloseErrorCB(conn)
+}
+
+func (conn *Conn) SetNonce(i uint64) {
+	conn.nonceIdx = i
+}
+
+func (conn *Conn) Nonce() uint64 {
+	return conn.nonceIdx
+}
+
+func (conn *Conn) SetPeerNonce(i uint64) {
+	conn.peerNonceIdx = i
+}
+
+func (conn *Conn) PeerNonce() uint64 {
+	return conn.peerNonceIdx
+}
+
+func (conn *Conn) IncrNonce() {
+	conn.nonceIdx++
+}
+
+func (conn *Conn) IncrPeerNonce() {
+	conn.peerNonceIdx++
 }

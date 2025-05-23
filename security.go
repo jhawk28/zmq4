@@ -24,10 +24,10 @@ type Security interface {
 
 type SecurityEncryption interface {
 	// Encrypt writes the encrypted form of data to w.
-	Encrypt(data []byte, more bool) ([]byte, error)
+	Encrypt(conn *Conn, data []byte, more bool) ([]byte, error)
 
 	// Decrypt writes the decrypted form of data to w.
-	Decrypt(data []byte) ([]byte, bool, error)
+	Decrypt(conn *Conn, data []byte) ([]byte, bool, error)
 }
 
 // SecurityType denotes types of ZMTP security mechanisms
