@@ -168,7 +168,7 @@ func (c *Conn) SendCmd(name string, body []byte) error {
 	if err != nil {
 		return err
 	}
-	return c.send(true, buf, 0, false)
+	return c.send(true, buf, false)
 }
 
 // SendMsg sends a ZMTP message over the wire.
@@ -182,13 +182,11 @@ func (c *Conn) SendMsg(msg Msg) error {
 
 	nframes := len(msg.Frames)
 	for i, frame := range msg.Frames {
-		var flag byte
 		var more bool
 		if i < nframes-1 {
-			flag ^= hasMoreBitFlag
 			more = true
 		}
-		err := c.send(false, frame, flag, more)
+		err := c.send(false, frame, more)
 		if err != nil {
 			return fmt.Errorf("zmq4: error sending frame %d/%d: %w", i+1, nframes, err)
 		}
@@ -330,7 +328,8 @@ func (c *Conn) sendMulti(msg Msg) error {
 	return nil
 }
 
-func (c *Conn) send(isCommand bool, body []byte, flag byte, more bool) error {
+func (c *Conn) send(isCommand bool, body []byte, more bool) error {
+	var flag byte
 
 	// commands should not be encrypted.
 	if sec, ok := c.sec.(SecurityEncryption); ok && !isCommand {
@@ -340,6 +339,8 @@ func (c *Conn) send(isCommand bool, body []byte, flag byte, more bool) error {
 			return err
 		}
 		body = encrypt
+	} else if more {
+		flag ^= hasMoreBitFlag
 	}
 
 	// Long flag

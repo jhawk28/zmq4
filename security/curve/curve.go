@@ -177,8 +177,9 @@ func (sec *security) serverHandshake(conn *zmq4.Conn) error {
 // Encrypt writes the encrypted form of data to w.
 func (sec *security) Encrypt(data []byte, more bool) ([]byte, error) {
 	defer func() { sec.nonceIdx++ }()
-	out := make([]byte, 7+17+len(data))
-	copy(out, "MESSAGE")
+	out := make([]byte, 8+8+17+len(data))
+	out[0] = uint8(7)
+	copy(out[1:], "MESSAGE")
 
 	var nonce Nonce
 	if sec.asServer {
@@ -186,12 +187,13 @@ func (sec *security) Encrypt(data []byte, more bool) ([]byte, error) {
 	} else {
 		nonce.Short("CurveZMQMESSAGEC", sec.nonceIdx) // From client
 	}
+	binary.BigEndian.AppendUint64(out[8:8], sec.nonceIdx)
 	toSeal := make([]byte, 1+len(data))
 	if more {
 		toSeal[0] = 0x1
 	}
 	copy(toSeal[1:], data)
-	box.SealAfterPrecomputation(out[7:7], toSeal, nonce.N(), &sec.sharedKey)
+	box.SealAfterPrecomputation(out[16:16], toSeal, nonce.N(), &sec.sharedKey)
 	return out, nil
 }
 
