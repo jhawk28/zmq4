@@ -44,20 +44,19 @@ func NewKeyPair() (*KeyPair, error) {
 
 // security implements the CURVE security mechanism.
 type security struct {
-	serverPubKey [keySize]byte                           // Long-term server public key
-	keyFunc      func(conn *zmq4.Conn) (*KeyPair, error) // Long-term client key pair (optional for client, required for server)
-	asServer     bool                                    // True if this is a server
+	serverPubKey  [keySize]byte                               // Long-term server public key
+	clientKeyPair *KeyPair                                    // client KeyPair
+	keyFunc       func(clientKey *[32]byte) (*KeyPair, error) // Func for retrieving server's KeyPair
+	asServer      bool                                        // True if this is a server
 }
 
 // SecurityForClient returns a CURVE security mechanism for a client.
 // The client must know the server's public key.
 func SecurityForClient(serverKey [keySize]byte, clientKeys *KeyPair) zmq4.Security {
 	sec := &security{
-		serverPubKey: serverKey,
-		keyFunc: func(_ *zmq4.Conn) (*KeyPair, error) {
-			return clientKeys, nil
-		},
-		asServer: false,
+		serverPubKey:  serverKey,
+		clientKeyPair: clientKeys,
+		asServer:      false,
 	}
 	return sec
 }
@@ -66,7 +65,7 @@ func SecurityForClient(serverKey [keySize]byte, clientKeys *KeyPair) zmq4.Securi
 // The server must have its own key pair.
 func SecurityForServer(serverKeys *KeyPair) zmq4.Security {
 	sec := &security{
-		keyFunc: func(_ *zmq4.Conn) (*KeyPair, error) {
+		keyFunc: func(_ *[32]byte) (*KeyPair, error) {
 			return serverKeys, nil
 		},
 		asServer: true,
@@ -76,7 +75,7 @@ func SecurityForServer(serverKeys *KeyPair) zmq4.Security {
 
 // SecurityForServerFunc returns a CURVE security mechanism for a server.
 // The server must have its own key pair.
-func SecurityForServerFunc(keyFunc func(*zmq4.Conn) (*KeyPair, error)) zmq4.Security {
+func SecurityForServerFunc(keyFunc func(*[32]byte) (*KeyPair, error)) zmq4.Security {
 	sec := &security{
 		keyFunc:  keyFunc,
 		asServer: true,
@@ -122,12 +121,7 @@ func (sec *security) clientHandshake(conn *zmq4.Conn, ephemeral *KeyPair) error 
 		return fmt.Errorf("security/curve: failed WELCOME: %w", err)
 	}
 
-	keys, err := sec.keyFunc(conn)
-	if err != nil {
-		return fmt.Errorf("security/curve: could not generate keyFunc: %w", err)
-	}
-
-	err = sec.doInitiate(conn, servCookie, &nonce, keys, secretKey, ephemeral)
+	err = sec.doInitiate(conn, servCookie, &nonce, sec.clientKeyPair, secretKey, ephemeral)
 	if err != nil {
 		return fmt.Errorf("security/curve: failed INITIATE: %w", err)
 	}
@@ -156,12 +150,7 @@ func (sec *security) serverHandshake(conn *zmq4.Conn) error {
 	var nonce Nonce
 	var cookieKey [32]byte
 
-	keys, err := sec.keyFunc(conn)
-	if err != nil {
-		return fmt.Errorf("security/curve: could not generate keyFunc: %w", err)
-	}
-
-	clientTransPubKey, err := sec.doServerHello(&nonce, conn, keys)
+	clientTransPubKey, err := sec.doServerHello(&nonce, conn)
 	if err != nil {
 		return fmt.Errorf("security/curve: Client hello failed: %w", err)
 	}
@@ -170,7 +159,7 @@ func (sec *security) serverHandshake(conn *zmq4.Conn) error {
 	if err != nil {
 		panic(fmt.Sprintf("Failed creating cookie key: %s", err.Error()))
 	}
-	err = sec.doServerWelcome(&nonce, conn, keys, &clientTransPubKey, &cookieKey, kp)
+	err = sec.doServerWelcome(&nonce, conn, &clientTransPubKey, &cookieKey, kp)
 	if err != nil {
 		return fmt.Errorf("security/curve: Failed sending welcome: %w", err)
 	}
@@ -342,7 +331,7 @@ func (sec *security) doReady(conn *zmq4.Conn, nonce *Nonce, secretKey *[32]byte,
 	return servMeta, nil
 }
 
-func (sec *security) doServerHello(nonce *Nonce, conn *zmq4.Conn, keys *KeyPair) (clientTransPubKey [32]byte, err error) {
+func (sec *security) doServerHello(nonce *Nonce, conn *zmq4.Conn) (clientTransPubKey [32]byte, err error) {
 	cmd, err := conn.RecvCmd()
 	if err != nil {
 		return clientTransPubKey, err
@@ -368,6 +357,12 @@ func (sec *security) doServerHello(nonce *Nonce, conn *zmq4.Conn, keys *KeyPair)
 		return
 	}
 	var out [64]byte
+
+	keys, err := sec.keyFunc(&clientTransPubKey)
+	if err != nil {
+		return clientTransPubKey, fmt.Errorf("security/curve: hello could not retrieve keypair: %w", err)
+	}
+
 	_, ok := box.Open(out[0:0], cmd.Body[114:], nonce.N(), &clientTransPubKey, &keys.Private)
 	if !ok {
 		err = fmt.Errorf("security/curve: Invalid signature in hello command")
@@ -383,7 +378,7 @@ func (sec *security) doServerHello(nonce *Nonce, conn *zmq4.Conn, keys *KeyPair)
 	return
 }
 
-func (sec *security) doServerWelcome(nonce *Nonce, conn *zmq4.Conn, keys *KeyPair, clientTransPubKey, cookieKey *[32]byte, kp *KeyPair) error {
+func (sec *security) doServerWelcome(nonce *Nonce, conn *zmq4.Conn, clientTransPubKey, cookieKey *[32]byte, kp *KeyPair) error {
 	welcomeBody := make([]byte, 160)
 	var cookie [64]byte
 	copy(cookie[:], clientTransPubKey[:])
@@ -400,6 +395,10 @@ func (sec *security) doServerWelcome(nonce *Nonce, conn *zmq4.Conn, keys *KeyPai
 	copy(welcomeBox[32:], cookieData)
 	nonce.Long("WELCOME-")
 	copy(welcomeBody, nonce[8:])
+	keys, err := sec.keyFunc(clientTransPubKey)
+	if err != nil {
+		return fmt.Errorf("security/curve: welcome could not retrieve keypair: %w", err)
+	}
 	box.Seal(welcomeBody[16:16], welcomeBox, nonce.N(), clientTransPubKey, &keys.Private)
 	return conn.SendCmd(zmq4.CmdWelcome, welcomeBody)
 }
