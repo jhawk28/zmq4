@@ -168,7 +168,7 @@ func (sec *security) serverHandshake(conn *zmq4.Conn) error {
 
 	kp, err := NewKeyPair()
 	if err != nil {
-		panic(fmt.Sprintf("Failed creaing cookie key: %s", err.Error()))
+		panic(fmt.Sprintf("Failed creating cookie key: %s", err.Error()))
 	}
 	err = sec.doServerWelcome(&nonce, conn, keys, &clientTransPubKey, &cookieKey, kp)
 	if err != nil {
