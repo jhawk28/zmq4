@@ -64,6 +64,14 @@ func (c *Conn) Write(p []byte) (int, error) {
 	return n, err
 }
 
+func (c *Conn) LocalAddr() net.Addr {
+	return c.rw.LocalAddr()
+}
+
+func (c *Conn) RemoteAddr() net.Addr {
+	return c.rw.RemoteAddr()
+}
+
 // Open opens a ZMTP connection over rw with the given security, socket type and identity.
 // An optional onCloseErrorCB can be provided to inform the caller when this Conn is closed.
 // Open performs a complete ZMTP handshake.

@@ -20,7 +20,7 @@ import (
 )
 
 const (
-	keySize   = 32 // Size of public and private keys
+	keySize   = 32 // Size of public and private keyFunc
 	nonceSize = 24 // Size of nonce
 )
 
@@ -44,9 +44,9 @@ func NewKeyPair() (*KeyPair, error) {
 
 // security implements the CURVE security mechanism.
 type security struct {
-	serverPubKey [keySize]byte // Long-term server public key
-	keys         *KeyPair      // Long-term client key pair (optional for client, required for server)
-	asServer     bool          // True if this is a server
+	serverPubKey [keySize]byte                           // Long-term server public key
+	keyFunc      func(conn *zmq4.Conn) (*KeyPair, error) // Long-term client key pair (optional for client, required for server)
+	asServer     bool                                    // True if this is a server
 }
 
 // SecurityForClient returns a CURVE security mechanism for a client.
@@ -54,8 +54,10 @@ type security struct {
 func SecurityForClient(serverKey [keySize]byte, clientKeys *KeyPair) zmq4.Security {
 	sec := &security{
 		serverPubKey: serverKey,
-		keys:         clientKeys,
-		asServer:     false,
+		keyFunc: func(_ *zmq4.Conn) (*KeyPair, error) {
+			return clientKeys, nil
+		},
+		asServer: false,
 	}
 	return sec
 }
@@ -64,7 +66,19 @@ func SecurityForClient(serverKey [keySize]byte, clientKeys *KeyPair) zmq4.Securi
 // The server must have its own key pair.
 func SecurityForServer(serverKeys *KeyPair) zmq4.Security {
 	sec := &security{
-		keys:     serverKeys,
+		keyFunc: func(_ *zmq4.Conn) (*KeyPair, error) {
+			return serverKeys, nil
+		},
+		asServer: true,
+	}
+	return sec
+}
+
+// SecurityForServerFunc returns a CURVE security mechanism for a server.
+// The server must have its own key pair.
+func SecurityForServerFunc(keyFunc func(*zmq4.Conn) (*KeyPair, error)) zmq4.Security {
+	sec := &security{
+		keyFunc:  keyFunc,
 		asServer: true,
 	}
 	return sec
@@ -108,7 +122,12 @@ func (sec *security) clientHandshake(conn *zmq4.Conn, ephemeral *KeyPair) error 
 		return fmt.Errorf("security/curve: failed WELCOME: %w", err)
 	}
 
-	err = sec.doInitiate(conn, servCookie, &nonce, secretKey, ephemeral)
+	keys, err := sec.keyFunc(conn)
+	if err != nil {
+		return fmt.Errorf("security/curve: could not generate keyFunc: %w", err)
+	}
+
+	err = sec.doInitiate(conn, servCookie, &nonce, keys, secretKey, ephemeral)
 	if err != nil {
 		return fmt.Errorf("security/curve: failed INITIATE: %w", err)
 	}
@@ -136,7 +155,13 @@ func (sec *security) clientHandshake(conn *zmq4.Conn, ephemeral *KeyPair) error 
 func (sec *security) serverHandshake(conn *zmq4.Conn) error {
 	var nonce Nonce
 	var cookieKey [32]byte
-	clientTransPubKey, err := sec.doServerHello(&nonce, conn)
+
+	keys, err := sec.keyFunc(conn)
+	if err != nil {
+		return fmt.Errorf("security/curve: could not generate keyFunc: %w", err)
+	}
+
+	clientTransPubKey, err := sec.doServerHello(&nonce, conn, keys)
 	if err != nil {
 		return fmt.Errorf("security/curve: Client hello failed: %w", err)
 	}
@@ -145,7 +170,7 @@ func (sec *security) serverHandshake(conn *zmq4.Conn) error {
 	if err != nil {
 		panic(fmt.Sprintf("Failed creaing cookie key: %s", err.Error()))
 	}
-	err = sec.doServerWelcome(&nonce, conn, &clientTransPubKey, &cookieKey, kp)
+	err = sec.doServerWelcome(&nonce, conn, keys, &clientTransPubKey, &cookieKey, kp)
 	if err != nil {
 		return fmt.Errorf("security/curve: Failed sending welcome: %w", err)
 	}
@@ -266,7 +291,7 @@ func (sec *security) doWelcome(nonce *Nonce, conn *zmq4.Conn, ephemeral *KeyPair
 	return welcomeBox[32:], &secretKey, nil
 }
 
-func (sec *security) doInitiate(conn *zmq4.Conn, servCookie []byte, nonce *Nonce, secretKey *[32]byte, ephemeral *KeyPair) error {
+func (sec *security) doInitiate(conn *zmq4.Conn, servCookie []byte, nonce *Nonce, keys *KeyPair, secretKey *[32]byte, ephemeral *KeyPair) error {
 	meta, err := conn.Meta.MarshalZMTP()
 	if err != nil {
 		return fmt.Errorf("security/curve: could not marshal metadata: %w", err)
@@ -281,10 +306,10 @@ func (sec *security) doInitiate(conn *zmq4.Conn, servCookie []byte, nonce *Nonce
 	copy(vouch, ephemeral.Public[:])
 	copy(vouch[32:], sec.serverPubKey[:])
 	vouchBox := make([]byte, 80)
-	box.Seal(vouchBox[0:0], vouch, nonce.N(), secretKey, &sec.keys.Private)
+	box.Seal(vouchBox[0:0], vouch, nonce.N(), secretKey, &keys.Private)
 
 	initBox := make([]byte, 128+len(meta))
-	copy(initBox, sec.keys.Public[:])
+	copy(initBox, keys.Public[:])
 	copy(initBox[32:48], nonce[8:])
 	copy(initBox[48:128], vouchBox)
 	copy(initBox[128:], meta)
@@ -317,7 +342,7 @@ func (sec *security) doReady(conn *zmq4.Conn, nonce *Nonce, secretKey *[32]byte,
 	return servMeta, nil
 }
 
-func (sec *security) doServerHello(nonce *Nonce, conn *zmq4.Conn) (clientTransPubKey [32]byte, err error) {
+func (sec *security) doServerHello(nonce *Nonce, conn *zmq4.Conn, keys *KeyPair) (clientTransPubKey [32]byte, err error) {
 	cmd, err := conn.RecvCmd()
 	if err != nil {
 		return clientTransPubKey, err
@@ -343,7 +368,7 @@ func (sec *security) doServerHello(nonce *Nonce, conn *zmq4.Conn) (clientTransPu
 		return
 	}
 	var out [64]byte
-	_, ok := box.Open(out[0:0], cmd.Body[114:], nonce.N(), &clientTransPubKey, &sec.keys.Private)
+	_, ok := box.Open(out[0:0], cmd.Body[114:], nonce.N(), &clientTransPubKey, &keys.Private)
 	if !ok {
 		err = fmt.Errorf("security/curve: Invalid signature in hello command")
 		return
@@ -358,7 +383,7 @@ func (sec *security) doServerHello(nonce *Nonce, conn *zmq4.Conn) (clientTransPu
 	return
 }
 
-func (sec *security) doServerWelcome(nonce *Nonce, conn *zmq4.Conn, clientTransPubKey, cookieKey *[32]byte, kp *KeyPair) error {
+func (sec *security) doServerWelcome(nonce *Nonce, conn *zmq4.Conn, keys *KeyPair, clientTransPubKey, cookieKey *[32]byte, kp *KeyPair) error {
 	welcomeBody := make([]byte, 160)
 	var cookie [64]byte
 	copy(cookie[:], clientTransPubKey[:])
@@ -375,7 +400,7 @@ func (sec *security) doServerWelcome(nonce *Nonce, conn *zmq4.Conn, clientTransP
 	copy(welcomeBox[32:], cookieData)
 	nonce.Long("WELCOME-")
 	copy(welcomeBody, nonce[8:])
-	box.Seal(welcomeBody[16:16], welcomeBox, nonce.N(), clientTransPubKey, &sec.keys.Private)
+	box.Seal(welcomeBody[16:16], welcomeBox, nonce.N(), clientTransPubKey, &keys.Private)
 	return conn.SendCmd(zmq4.CmdWelcome, welcomeBody)
 }
 
