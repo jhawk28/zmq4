@@ -4,7 +4,7 @@
 
 // Package transport defines the Transport interface and provides a net-based
 // implementation that can be used by zmq4 sockets to exchange messages.
-package transport // import "github.com/go-zeromq/zmq4/transport"
+package transport // import "github.com/jhawk28/zmq4/transport"
 
 import (
 	"context"

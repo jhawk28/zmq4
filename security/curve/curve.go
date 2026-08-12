@@ -13,7 +13,7 @@ import (
 	"io"
 	"unsafe"
 
-	"github.com/go-zeromq/zmq4"
+	"github.com/jhawk28/zmq4"
 	"golang.org/x/crypto/curve25519"
 	"golang.org/x/crypto/nacl/box"
 	"golang.org/x/crypto/nacl/secretbox"
