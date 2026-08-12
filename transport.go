@@ -9,8 +9,8 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/go-zeromq/zmq4/internal/inproc"
-	"github.com/go-zeromq/zmq4/transport"
+	"github.com/jhawk28/zmq4/internal/inproc"
+	"github.com/jhawk28/zmq4/transport"
 )
 
 // UnknownTransportError records an error when trying to

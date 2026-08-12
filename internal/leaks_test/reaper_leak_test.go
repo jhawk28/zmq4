@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-zeromq/zmq4"
+	"github.com/jhawk28/zmq4"
 	"go.uber.org/goleak"
 )
 

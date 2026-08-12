@@ -8,7 +8,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/go-zeromq/zmq4/internal/inproc"
+	"github.com/jhawk28/zmq4/internal/inproc"
 )
 
 func TestTransport(t *testing.T) {
